@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { getBoastPosts, getPopularBoastPosts, searchByNatural, searchByLike, type BoastPostItem } from '@/lib/api/posts';
+import { getBoastPosts, getPopularBoastPosts, searchByFts, searchByLike, type BoastPostItem } from '@/lib/api/posts';
 import { formatCount } from '@/lib/format';
 
 // 목록으로 돌아올 때 Router Cache(static 세그먼트, 기본 5분)를 타지 않고 항상 리마운트되어
@@ -209,7 +209,7 @@ export default function BoastPage() {
     setSearchElapsed(null);
     const start = performance.now();
     try {
-      const fn = mode === 'fts' ? searchByNatural : searchByLike;
+      const fn = mode === 'fts' ? searchByFts : searchByLike;
       const data = await fn(keyword, 0, PAGE_SIZE);
       setSearchResults(data.content);
       setSearchTotalElements(data.totalElements);
@@ -227,7 +227,7 @@ export default function BoastPage() {
     if (!searchMode || isSearching) return;
     window.scrollTo({ top: 0, behavior: 'smooth' });
     setIsSearching(true);
-    const fn = searchMode === 'fts' ? searchByNatural : searchByLike;
+    const fn = searchMode === 'fts' ? searchByFts : searchByLike;
     const start = performance.now();
     try {
       const data = await fn(searchKeyword, page, PAGE_SIZE);
@@ -310,19 +310,34 @@ export default function BoastPage() {
                 )}
               </div>
 
-              {/* 검색 버튼 */}
+              {/* 검색 버튼 (BOOLEAN MODE) */}
               <button
                 onClick={() => handleSearch('fts')}
                 disabled={isSearching}
                 className={`flex items-center gap-2 px-4 py-3 rounded-full text-[13px] font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed border
-                  ${searchMode !== null
+                  ${searchMode === 'fts'
                     ? 'bg-charcoal text-white border-charcoal shadow-md'
                     : 'bg-white text-charcoal border-black/10 hover:bg-black/5'}`}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                 </svg>
-                {isSearching ? '검색 중...' : '검색'}
+                {isSearching && searchMode === 'fts' ? '검색 중...' : '검색'}
+              </button>
+
+              {/* LIKE 검색 버튼 (성능 비교용) */}
+              <button
+                onClick={() => handleSearch('like')}
+                disabled={isSearching}
+                className={`flex items-center gap-2 px-4 py-3 rounded-full text-[13px] font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed border
+                  ${searchMode === 'like'
+                    ? 'bg-charcoal text-white border-charcoal shadow-md'
+                    : 'bg-white text-charcoal border-black/10 hover:bg-black/5'}`}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                {isSearching && searchMode === 'like' ? '검색 중...' : 'LIKE 검색'}
               </button>
             </div>
 

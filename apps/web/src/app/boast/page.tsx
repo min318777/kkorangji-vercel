@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { getBoastPosts, getPopularBoastPosts, searchByFts, searchByLike, type BoastPostItem } from '@/lib/api/posts';
+import { getBoastPosts, getPopularBoastPosts, searchByNatural, searchByLike, type BoastPostItem } from '@/lib/api/posts';
 import { formatCount } from '@/lib/format';
 
 // 목록으로 돌아올 때 Router Cache(static 세그먼트, 기본 5분)를 타지 않고 항상 리마운트되어
@@ -209,7 +209,7 @@ export default function BoastPage() {
     setSearchElapsed(null);
     const start = performance.now();
     try {
-      const fn = mode === 'fts' ? searchByFts : searchByLike;
+      const fn = mode === 'fts' ? searchByNatural : searchByLike;
       const data = await fn(keyword, 0, PAGE_SIZE);
       setSearchResults(data.content);
       setSearchTotalElements(data.totalElements);
@@ -227,7 +227,7 @@ export default function BoastPage() {
     if (!searchMode || isSearching) return;
     window.scrollTo({ top: 0, behavior: 'smooth' });
     setIsSearching(true);
-    const fn = searchMode === 'fts' ? searchByFts : searchByLike;
+    const fn = searchMode === 'fts' ? searchByNatural : searchByLike;
     const start = performance.now();
     try {
       const data = await fn(searchKeyword, page, PAGE_SIZE);

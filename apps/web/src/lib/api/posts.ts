@@ -420,6 +420,17 @@ export async function searchByFts(keyword: string, page = 0, size = 12): Promise
   return json.data;
 }
 
+// FTS 검색 (자연어 모드) — GET /api/meow/boast-cat-posts/search/natural?keyword=... (50% 이상 문서에 등장하는 단어는 자동 무시됨)
+export async function searchByNatural(keyword: string, page = 0, size = 12): Promise<SearchPageResponse> {
+  const params = new URLSearchParams({ keyword, page: String(page), size: String(size) });
+  const res = await fetch(
+    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/search/natural?${params}`
+  );
+  if (!res.ok) throw new Error('자연어 모드 검색에 실패했습니다.');
+  const json: ApiResponse<SearchPageResponse> = await res.json();
+  return json.data;
+}
+
 // LIKE 검색 — GET /api/meow/boast-cat-posts/search/like?title=...&contents=... (Full Table Scan, 성능 비교용)
 export async function searchByLike(keyword: string, page = 0, size = 12): Promise<SearchPageResponse> {
   const params = new URLSearchParams({ title: keyword, contents: keyword, page: String(page), size: String(size) });

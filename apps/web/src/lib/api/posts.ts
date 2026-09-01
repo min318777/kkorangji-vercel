@@ -39,10 +39,10 @@ export async function getBoastPosts(page = 0, size = 12) {
   return json.data;
 }
 
-// 인기 자랑글 TOP 24 조회 — GET /api/meow/boast-cat-posts/popular/v5 (Redis Sorted Set 실시간 집계)
+// 인기 자랑글 TOP 24 조회 — GET /api/meow/boast-cat-posts/popular (v1, 기본 캐시)
 export async function getPopularBoastPosts(): Promise<BoastPostItem[]> {
   const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/popular/v5`,
+    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/popular`,
     { cache: 'no-store' }
   );
   if (!res.ok) throw new Error('인기글을 불러오지 못했습니다.');

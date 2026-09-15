@@ -431,9 +431,9 @@ export async function searchByNatural(keyword: string, page = 0, size = 12): Pro
   return json.data;
 }
 
-// LIKE 검색 — GET /api/meow/boast-cat-posts/search/like?title=...&contents=... (Full Table Scan, 성능 비교용)
+// LIKE 검색 — GET /api/meow/boast-cat-posts/search/like?keyword=... (Full Table Scan, 성능 비교용)
 export async function searchByLike(keyword: string, page = 0, size = 12): Promise<SearchPageResponse> {
-  const params = new URLSearchParams({ title: keyword, contents: keyword, page: String(page), size: String(size) });
+  const params = new URLSearchParams({ keyword, page: String(page), size: String(size) });
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/search/like?${params}`
   );
@@ -453,9 +453,9 @@ export async function searchLostByFts(keyword: string, page = 0, size = 12): Pro
   return json.data;
 }
 
-// 실종글 LIKE 검색 — GET /api/meow/lost-cat-posts/search/like?title=...&contents=...
+// 실종글 LIKE 검색 — GET /api/meow/lost-cat-posts/search/like?keyword=...
 export async function searchLostByLike(keyword: string, page = 0, size = 12): Promise<LostSearchPageResponse> {
-  const params = new URLSearchParams({ title: keyword, contents: keyword, page: String(page), size: String(size) });
+  const params = new URLSearchParams({ keyword, page: String(page), size: String(size) });
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/lost-cat-posts/search/like?${params}`
   );

@@ -1,4 +1,4 @@
-import { apiRequest } from './client';
+import { apiRequest, BASE_URL, reissueToken } from './client';
 
 // ===== 자랑글 목록 응답 DTO =====
 export interface BoastPostItem {
@@ -57,11 +57,17 @@ export interface PresignedUrlItem {
   key: string;          // 게시글 생성 시 전달할 S3 key
 }
 
+// Presigned URL 발급 요청 항목 — 파일 크기를 같이 보내야 서버가 10MB/200MB 초과 여부를 검증할 수 있음
+export interface PresignedFileRequest {
+  contentType: string;
+  fileSize: number; // byte
+}
+
 // S3 Presigned URL 발급 — POST /api/images/presigned-urls (인증 필요)
-export async function getPresignedUrls(contentTypes: string[]): Promise<PresignedUrlItem[]> {
+export async function getPresignedUrls(files: PresignedFileRequest[]): Promise<PresignedUrlItem[]> {
   const res = await apiRequest<ApiResponse<PresignedUrlItem[]>>('/api/images/presigned-urls', {
     method: 'POST',
-    body: JSON.stringify({ contentTypes }),
+    body: JSON.stringify({ files }),
   });
   return res.data;
 }
@@ -76,11 +82,47 @@ export async function uploadToS3(presignedUrl: string, file: File): Promise<void
   if (!res.ok) throw new Error('이미지 업로드에 실패했습니다.');
 }
 
+// [TEST] 서버 경유(멀티파트) 동영상 업로드 후 자랑글 작성 — POST /api/test/boast-posts/legacy-upload (인증 필요)
+// Presigned 방식과의 응답 시간 비교 측정 전용 — local 프로필에서만 동작
+export async function legacyUploadBoastPost(
+  data: { title: string; content?: string; video: File },
+  _retry = true // 401 재시도 여부 (무한 루프 방지)
+): Promise<{ id: number }> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('accessToken') : null;
+  const formData = new FormData();
+  formData.append('title', data.title);
+  formData.append('content', data.content ?? '');
+  formData.append('video', data.video);
+
+  const res = await fetch(`${BASE_URL}/api/test/boast-posts/legacy-upload`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: formData,
+    credentials: 'include',
+  });
+
+  // 401 — 토큰 만료 시 재발급 후 재시도 (apiRequest의 401 처리와 동일한 패턴)
+  if (res.status === 401 && _retry) {
+    const newToken = await reissueToken();
+    if (newToken) {
+      return legacyUploadBoastPost(data, false);
+    }
+  }
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({ message: '서버 경유 업로드에 실패했습니다.' }));
+    throw new Error(errorData.message ?? '서버 경유 업로드에 실패했습니다.');
+  }
+  const json: ApiResponse<{ id: number }> = await res.json();
+  return json.data;
+}
+
 // 자랑글 생성 — POST /api/meow/boast-cat-posts (인증 필요)
 export async function createBoastPost(data: {
   title: string;
   content?: string;
   imageKeys?: string[];
+  videoKey?: string;
 }): Promise<{ id: number }> {
   const res = await apiRequest<ApiResponse<{ id: number }>>('/api/meow/boast-cat-posts', {
     method: 'POST',
@@ -98,6 +140,7 @@ export interface BoastPostDetail {
   title: string;
   contents: string;
   imageUrls: string[];
+  videoUrl: string | null;
   likeCount: number;
   commentCount: number;
   view: number;
@@ -115,10 +158,10 @@ export async function getBoastPost(id: number): Promise<BoastPostDetail> {
   return json.data;
 }
 
-// 자랑글 상세 조회 + 조회수 증가 통합 — GET /api/meow/boast-cat-posts/view/v3/{id}
+// 자랑글 상세 조회 + 조회수 증가 통합 — GET /api/meow/boast-cat-posts/view/v2/{id} (원자적 UPDATE, 채택)
 export async function getBoastPostWithView(id: number): Promise<BoastPostDetail> {
   const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/view/v3/${id}`
+    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/view/v2/${id}`
   );
   if (!res.ok) throw new Error('게시글을 불러오지 못했습니다.');
   const json: ApiResponse<BoastPostDetail> = await res.json();
@@ -141,7 +184,7 @@ export interface CommentItem {
 // 댓글 목록 조회 — GET /api/meow/boast-cat-posts/{id}/comments (인증 불필요)
 export async function getBoastComments(postId: number, page = 0, size = 20) {
   const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat-posts/${postId}/comments?page=${page}&size=${size}`
+    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/boast-cat/${postId}/comments?page=${page}&size=${size}`
   );
   if (!res.ok) throw new Error('댓글을 불러오지 못했습니다.');
   const json: ApiResponse<PageResponse<CommentItem>> = await res.json();
@@ -161,7 +204,7 @@ export interface RegisterCommentResult {
 // 댓글 작성 — POST /api/meow/boast-cat-posts/{id}/comments (인증 필요)
 export async function postBoastComment(postId: number, content: string, parentCommentId?: number): Promise<RegisterCommentResult> {
   const res = await apiRequest<ApiResponse<RegisterCommentResult>>(
-    `/api/meow/boast-cat-posts/${postId}/comments`,
+    `/api/meow/boast-cat/${postId}/comments`,
     { method: 'POST', body: JSON.stringify({ content, parentCommentId: parentCommentId ?? null }) }
   );
   return res.data;
@@ -313,7 +356,7 @@ export async function getLostPostWithView(id: number): Promise<LostPostDetail> {
 // 실종글 댓글 목록 조회 — GET /api/meow/lost-cat-posts/{postId}/comments (인증 불필요)
 export async function getLostComments(postId: number, page = 0, size = 20) {
   const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/lost-cat-posts/${postId}/comments?page=${page}&size=${size}`
+    `${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'}/api/meow/lost-cat/${postId}/comments?page=${page}&size=${size}`
   );
   if (!res.ok) throw new Error('댓글을 불러오지 못했습니다.');
   const json: ApiResponse<PageResponse<CommentItem>> = await res.json();
@@ -323,7 +366,7 @@ export async function getLostComments(postId: number, page = 0, size = 20) {
 // 실종글 댓글 작성 — POST /api/meow/lost-cat-posts/{postId}/comments (인증 필요)
 export async function postLostComment(postId: number, content: string, parentCommentId?: number): Promise<RegisterLostCommentResult> {
   const res = await apiRequest<ApiResponse<RegisterLostCommentResult>>(
-    `/api/meow/lost-cat-posts/${postId}/comments`,
+    `/api/meow/lost-cat/${postId}/comments`,
     { method: 'POST', body: JSON.stringify({ content, parentCommentId: parentCommentId ?? null }) }
   );
   return res.data;
@@ -340,11 +383,18 @@ export interface ImageItemRequest {
   value: string; // EXISTING이면 CloudFront URL, NEW면 S3 key
 }
 
+// 게시글 수정 시 동영상 상태 (미포함 시 기존 동영상 유지)
+export interface VideoItemRequest {
+  type: 'EXISTING' | 'NEW' | 'REMOVE';
+  value?: string; // EXISTING이면 CloudFront URL, NEW면 S3 key, REMOVE면 생략 가능
+}
+
 // 자랑글 수정 — PUT /api/meow/boast-cat-posts/{id} (인증 필요)
 export async function updateBoastPost(id: number, data: {
   title?: string;
   content?: string;
   images?: ImageItemRequest[];
+  video?: VideoItemRequest;
 }): Promise<void> {
   await apiRequest(`/api/meow/boast-cat-posts/${id}`, {
     method: 'PATCH',

@@ -8,6 +8,10 @@ import { useFlipAnimation } from '@/hooks/useFlipAnimation';
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
 const MAX_IMAGES = 10;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+
+const ALLOWED_VIDEO_TYPE = 'video/mp4';
+const MAX_VIDEO_BYTES = 200 * 1024 * 1024; // 200MB
 
 // 기존 이미지 + 새 이미지를 하나의 순서 리스트로 통합 관리
 interface ImageItem {
@@ -16,6 +20,12 @@ interface ImageItem {
   url: string; // existing: CloudFront URL, new: 미리보기용 objectURL
   file?: File; // new일 때만 존재
 }
+
+// 동영상 상태 — existing(기존 유지), new(새로 교체), removed(삭제)
+type VideoState =
+  | { type: 'existing'; url: string }
+  | { type: 'new'; url: string; file: File }
+  | { type: 'removed' };
 
 export default function BoastEditPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -31,6 +41,8 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
 
   // 이미지 (기존 + 새 이미지 통합 순서 리스트)
   const [images, setImages] = useState<ImageItem[]>([]);
+  // 동영상 (없으면 null, 있으면 existing/new/removed 중 하나)
+  const [video, setVideo] = useState<VideoState | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState('');
@@ -41,6 +53,7 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
   const imageGridRef = useFlipAnimation(images.map((img) => img.id));
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
 
   // 로그인 + 게시글 소유자 확인
   useEffect(() => {
@@ -60,6 +73,7 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
         setImages(
           (data.imageUrls ?? []).map((url) => ({ id: url, type: 'existing' as const, url }))
         );
+        setVideo(data.videoUrl ? { type: 'existing', url: data.videoUrl } : null);
         setIsLoading(false);
       })
       .catch(() => {
@@ -73,15 +87,25 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
     return () => { images.forEach((img) => { if (img.type === 'new') URL.revokeObjectURL(img.url); }); };
   }, [images]);
 
+  // 언마운트 시 새 동영상 미리보기 URL 해제
+  useEffect(() => {
+    return () => { if (video?.type === 'new') URL.revokeObjectURL(video.url); };
+  }, [video]);
+
   const totalImageCount = images.length;
 
   // 새 이미지 추가
   const addFiles = useCallback((files: FileList | File[]) => {
     const fileArr = Array.from(files).filter((f) => ALLOWED_TYPES.includes(f.type));
+    const sizedFiles = fileArr.filter((f) => f.size <= MAX_IMAGE_BYTES);
+    if (sizedFiles.length !== fileArr.length) {
+      setError('이미지는 장당 최대 10MB까지 업로드 가능합니다.');
+      return;
+    }
     setImages((prev) => {
       const remaining = MAX_IMAGES - prev.length;
       if (remaining <= 0) { setError(`이미지는 최대 ${MAX_IMAGES}장까지 가능합니다.`); return prev; }
-      const toAdd: ImageItem[] = fileArr.slice(0, remaining).map((file) => ({
+      const toAdd: ImageItem[] = sizedFiles.slice(0, remaining).map((file) => ({
         id: `${Date.now()}-${Math.random()}`,
         type: 'new',
         url: URL.createObjectURL(file),
@@ -90,6 +114,25 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
       return [...prev, ...toAdd];
     });
     setError('');
+  }, []);
+
+  // 새 동영상 추가 (기존/새 동영상 교체)
+  const addVideo = useCallback((file: File) => {
+    if (file.type !== ALLOWED_VIDEO_TYPE) { setError('mp4 형식만 업로드할 수 있습니다.'); return; }
+    if (file.size > MAX_VIDEO_BYTES) { setError('동영상은 최대 200MB까지 업로드 가능합니다.'); return; }
+    setVideo((prev) => {
+      if (prev?.type === 'new') URL.revokeObjectURL(prev.url);
+      return { type: 'new', url: URL.createObjectURL(file), file };
+    });
+    setError('');
+  }, []);
+
+  // 동영상 제거 (기존 동영상이면 REMOVE로 표시, 새로 추가한 동영상이면 미리보기만 해제)
+  const removeVideo = useCallback(() => {
+    setVideo((prev) => {
+      if (prev?.type === 'new') URL.revokeObjectURL(prev.url);
+      return prev ? { type: 'removed' } : null;
+    });
   }, []);
 
   // 이미지 순서 변경 (기존/새 이미지 혼합 가능)
@@ -142,18 +185,28 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
     try {
       const newImages = images.filter((img) => img.type === 'new');
       const keyById = new Map<string, string>();
+      const isNewVideo = video?.type === 'new';
 
-      // 새 이미지 S3 업로드
-      if (newImages.length > 0) {
-        setSubmitStep('이미지 업로드 준비 중...');
-        const contentTypes = newImages.map((img) => img.file!.type);
-        const presignedItems = await getPresignedUrls(contentTypes);
+      // 새 이미지 + 새 동영상 S3 업로드 (한 번에 발급 요청)
+      if (newImages.length > 0 || isNewVideo) {
+        setSubmitStep('업로드 준비 중...');
+        const fileRequests = [
+          ...newImages.map((img) => ({ contentType: img.file!.type, fileSize: img.file!.size })),
+          ...(isNewVideo ? [{ contentType: video.file.type, fileSize: video.file.size }] : []),
+        ];
+        const presignedItems = await getPresignedUrls(fileRequests);
 
-        setSubmitStep(`이미지 업로드 중...`);
+        setSubmitStep('업로드 중...');
         await Promise.all(
           newImages.map(async (img, idx) => uploadToS3(presignedItems[idx].presignedUrl, img.file!))
         );
         newImages.forEach((img, idx) => keyById.set(img.id, presignedItems[idx].key));
+
+        if (isNewVideo) {
+          const videoPresigned = presignedItems[newImages.length];
+          await uploadToS3(videoPresigned.presignedUrl, video.file);
+          keyById.set('__video__', videoPresigned.key);
+        }
       }
 
       // 화면에 보이는 순서 그대로 최종 이미지 목록 구성
@@ -163,11 +216,21 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
           : { type: 'NEW' as const, value: keyById.get(img.id)! }
       );
 
+      // 동영상 페이로드 구성 (미포함 시 기존 유지)
+      const videoPayload = video
+        ? video.type === 'existing'
+          ? { type: 'EXISTING' as const, value: video.url }
+          : video.type === 'new'
+            ? { type: 'NEW' as const, value: keyById.get('__video__')! }
+            : { type: 'REMOVE' as const }
+        : undefined;
+
       setSubmitStep('게시글 수정 중...');
       await updateBoastPost(postId, {
         title: title.trim(),
         content: content.trim(),
         images: imagePayload,
+        video: videoPayload,
       });
 
       router.push(`/boast/${postId}`);
@@ -331,6 +394,47 @@ export default function BoastEditPage({ params }: { params: Promise<{ id: string
                 )}
               </div>
             )}
+          </div>
+
+          {/* 동영상 관리 */}
+          <div className="mb-8">
+            <label className="block text-[13px] font-semibold text-charcoal mb-3">
+              동영상 <span className="font-normal opacity-40">(선택 · mp4, 최대 200MB, 1개)</span>
+            </label>
+
+            {!video || video.type === 'removed' ? (
+              <div
+                onClick={() => videoInputRef.current?.click()}
+                className="w-full h-[120px] rounded-[24px] border-2 border-dashed border-black/10 bg-white/50 hover:border-brand/50 hover:bg-white/80 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all duration-200"
+              >
+                <p className="text-[14px] font-medium text-charcoal/60">클릭해서 동영상을 추가하세요</p>
+                <p className="text-[11px] opacity-40">mp4 · 최대 200MB</p>
+              </div>
+            ) : (
+              <div className="relative rounded-[16px] overflow-hidden w-full max-w-[320px]">
+                <video src={video.url} controls className="w-full aspect-video bg-black" />
+                {video.type === 'new' && (
+                  <div className="absolute top-1.5 left-1.5 bg-charcoal text-white text-[9px] px-1.5 py-0.5 rounded-full font-semibold">NEW</div>
+                )}
+                <button
+                  type="button"
+                  onClick={removeVideo}
+                  className="absolute top-1.5 right-1.5 w-6 h-6 bg-black/60 text-white rounded-full flex items-center justify-center hover:bg-red-500"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            <input
+              ref={videoInputRef}
+              type="file"
+              accept={ALLOWED_VIDEO_TYPE}
+              className="hidden"
+              onChange={(e) => { if (e.target.files?.[0]) addVideo(e.target.files[0]); e.target.value = ''; }}
+            />
           </div>
 
           {/* 제목 */}

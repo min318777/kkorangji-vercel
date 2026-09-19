@@ -150,8 +150,8 @@ export default function LostWritePage() {
 
       if (images.length > 0) {
         setSubmitStep('이미지 업로드 준비 중...');
-        const contentTypes = images.map((img) => img.file.type);
-        const presignedItems = await getPresignedUrls(contentTypes);
+        const fileRequests = images.map((img) => ({ contentType: img.file.type, fileSize: img.file.size }));
+        const presignedItems = await getPresignedUrls(fileRequests);
 
         setSubmitStep(`이미지 업로드 중... (0/${images.length})`);
         await Promise.all(

@@ -3,18 +3,29 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { getPresignedUrls, uploadToS3, createBoastPost } from '@/lib/api/posts';
+import { getPresignedUrls, uploadToS3, createBoastPost, legacyUploadBoastPost } from '@/lib/api/posts';
 import { useFlipAnimation } from '@/hooks/useFlipAnimation';
 
 // 허용 이미지 형식
 const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
 const MAX_IMAGES = 10;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+
+// 허용 동영상 형식
+const ALLOWED_VIDEO_TYPE = 'video/mp4';
+const MAX_VIDEO_BYTES = 200 * 1024 * 1024; // 200MB
 
 // 선택된 이미지 파일 정보
 interface ImageFile {
   file: File;
   previewUrl: string; // 로컬 미리보기 URL (URL.createObjectURL)
   id: string;         // 고유 식별자
+}
+
+// 선택된 동영상 파일 정보
+interface VideoFile {
+  file: File;
+  previewUrl: string;
 }
 
 export default function BoastWritePage() {
@@ -27,11 +38,16 @@ export default function BoastWritePage() {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [images, setImages] = useState<ImageFile[]>([]);
+  const [video, setVideo] = useState<VideoFile | null>(null);
 
   // 제출 상태
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState('');
   const [error, setError] = useState('');
+
+  // [TEST] 서버 경유(멀티파트) 업로드 상태 — Presigned 방식과의 비교 측정 전용
+  const [isLegacyUploading, setIsLegacyUploading] = useState(false);
+  const [legacyResult, setLegacyResult] = useState('');
 
   // 드래그 앤 드롭 상태
   const [isDragging, setIsDragging] = useState(false);
@@ -40,6 +56,7 @@ export default function BoastWritePage() {
   const imageGridRef = useFlipAnimation(images.map((img) => img.id));
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
 
   // 로그인 상태 확인 — 미로그인 시 로그인 페이지로
   useEffect(() => {
@@ -58,6 +75,12 @@ export default function BoastWritePage() {
     };
   }, [images]);
 
+  useEffect(() => {
+    return () => {
+      if (video) URL.revokeObjectURL(video.previewUrl);
+    };
+  }, [video]);
+
   // 파일 추가 처리
   const addFiles = useCallback((files: FileList | File[]) => {
     const fileArr = Array.from(files);
@@ -69,23 +92,54 @@ export default function BoastWritePage() {
       return;
     }
 
+    // 이미지 크기 필터 (10MB)
+    const sizedFiles = validFiles.filter((f) => f.size <= MAX_IMAGE_BYTES);
+    if (sizedFiles.length !== validFiles.length) {
+      setError('이미지는 장당 최대 10MB까지 업로드 가능합니다.');
+      return;
+    }
+
     setImages((prev) => {
       const remaining = MAX_IMAGES - prev.length;
       if (remaining <= 0) {
         setError(`이미지는 최대 ${MAX_IMAGES}장까지 업로드 가능합니다.`);
         return prev;
       }
-      const toAdd = validFiles.slice(0, remaining).map((file) => ({
+      const toAdd = sizedFiles.slice(0, remaining).map((file) => ({
         file,
         previewUrl: URL.createObjectURL(file),
         id: `${Date.now()}-${Math.random()}`,
       }));
-      if (validFiles.length > remaining) {
+      if (sizedFiles.length > remaining) {
         setError(`이미지는 최대 ${MAX_IMAGES}장까지만 추가할 수 있습니다.`);
       }
       return [...prev, ...toAdd];
     });
     setError('');
+  }, []);
+
+  // 동영상 추가 처리 (최대 1개, mp4, 200MB)
+  const addVideo = useCallback((file: File) => {
+    if (file.type !== ALLOWED_VIDEO_TYPE) {
+      setError('mp4 형식만 업로드할 수 있습니다.');
+      return;
+    }
+    if (file.size > MAX_VIDEO_BYTES) {
+      setError('동영상은 최대 200MB까지 업로드 가능합니다.');
+      return;
+    }
+    setVideo((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl);
+      return { file, previewUrl: URL.createObjectURL(file) };
+    });
+    setError('');
+  }, []);
+
+  const removeVideo = useCallback(() => {
+    setVideo((prev) => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl);
+      return null;
+    });
   }, []);
 
   // 이미지 순서 변경 (드래그 앤 드롭으로 위치 교체)
@@ -146,24 +200,39 @@ export default function BoastWritePage() {
 
     try {
       let imageKeys: string[] = [];
+      let videoKey: string | undefined;
 
-      // 이미지가 있으면 S3 업로드 플로우 진행
-      if (images.length > 0) {
-        // 1단계: Presigned URL 발급
-        setSubmitStep('이미지 업로드 준비 중...');
-        const contentTypes = images.map((img) => img.file.type);
-        const presignedItems = await getPresignedUrls(contentTypes);
+      const totalFiles = images.length + (video ? 1 : 0);
+
+      // 이미지/동영상이 있으면 S3 업로드 플로우 진행
+      if (totalFiles > 0) {
+        // 1단계: Presigned URL 발급 (이미지 + 동영상을 한 번에 요청)
+        setSubmitStep('업로드 준비 중...');
+        const fileRequests = [
+          ...images.map((img) => ({ contentType: img.file.type, fileSize: img.file.size })),
+          ...(video ? [{ contentType: video.file.type, fileSize: video.file.size }] : []),
+        ];
+        const presignedItems = await getPresignedUrls(fileRequests);
 
         // 2단계: S3에 직접 업로드
-        setSubmitStep(`이미지 업로드 중... (0/${images.length})`);
+        setSubmitStep(`업로드 중... (0/${totalFiles})`);
+        let uploaded = 0;
         await Promise.all(
           images.map(async (img, idx) => {
             await uploadToS3(presignedItems[idx].presignedUrl, img.file);
-            setSubmitStep(`이미지 업로드 중... (${idx + 1}/${images.length})`);
+            uploaded += 1;
+            setSubmitStep(`업로드 중... (${uploaded}/${totalFiles})`);
           })
         );
+        if (video) {
+          const videoPresigned = presignedItems[images.length];
+          await uploadToS3(videoPresigned.presignedUrl, video.file);
+          uploaded += 1;
+          setSubmitStep(`업로드 중... (${uploaded}/${totalFiles})`);
+          videoKey = videoPresigned.key;
+        }
 
-        imageKeys = presignedItems.map((item) => item.key);
+        imageKeys = presignedItems.slice(0, images.length).map((item) => item.key);
       }
 
       // 3단계: 게시글 생성
@@ -172,6 +241,7 @@ export default function BoastWritePage() {
         title: title.trim(),
         content: content.trim(), // 빈 문자열도 전송 — DB NOT NULL 제약 대응
         imageKeys: imageKeys.length > 0 ? imageKeys : undefined,
+        videoKey,
       });
 
       // 성공 → 상세 페이지로 이동
@@ -181,6 +251,38 @@ export default function BoastWritePage() {
     } finally {
       setIsSubmitting(false);
       setSubmitStep('');
+    }
+  };
+
+  // [TEST] 서버 경유(멀티파트) 업로드 — 동영상을 서버가 직접 받아 S3로 재전송 후 자랑글 작성
+  // Presigned 방식(handleSubmit)과의 응답 시간 비교 측정 전용, local 프로필에서만 동작
+  const handleLegacyUpload = async () => {
+    if (!video) {
+      setLegacyResult('동영상을 먼저 선택해 주세요.');
+      return;
+    }
+    const validationError = validate();
+    if (validationError) {
+      setLegacyResult(validationError);
+      return;
+    }
+
+    setIsLegacyUploading(true);
+    setLegacyResult('');
+    const startedAt = performance.now();
+
+    try {
+      const result = await legacyUploadBoastPost({
+        title: title.trim(),
+        content: content.trim(),
+        video: video.file,
+      });
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      setLegacyResult(`서버 경유 업로드 완료 (${elapsedMs}ms) — postId: ${result.id}`);
+    } catch (err) {
+      setLegacyResult(err instanceof Error ? err.message : '서버 경유 업로드에 실패했습니다.');
+    } finally {
+      setIsLegacyUploading(false);
     }
   };
 
@@ -324,6 +426,65 @@ export default function BoastWritePage() {
                       <line x1="5" y1="12" x2="19" y2="12" />
                     </svg>
                   </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 동영상 업로드 영역 */}
+          <div className="mb-8">
+            <label className="block text-[13px] font-semibold text-charcoal mb-3">
+              동영상 <span className="font-normal opacity-40">(선택 · mp4, 최대 200MB, 1개)</span>
+            </label>
+
+            {!video ? (
+              <div
+                onClick={() => videoInputRef.current?.click()}
+                className="w-full h-[120px] rounded-[24px] border-2 border-dashed border-black/10 bg-white/50 hover:border-brand/50 hover:bg-white/80 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all duration-200"
+              >
+                <p className="text-[14px] font-medium text-charcoal/60">클릭해서 동영상을 추가하세요</p>
+                <p className="text-[11px] opacity-40">mp4 · 최대 200MB</p>
+              </div>
+            ) : (
+              <div className="relative rounded-[16px] overflow-hidden w-full max-w-[320px]">
+                <video src={video.previewUrl} controls className="w-full aspect-video bg-black" />
+                <button
+                  type="button"
+                  onClick={removeVideo}
+                  className="absolute top-1.5 right-1.5 w-6 h-6 bg-black/60 text-white rounded-full flex items-center justify-center hover:bg-red-500"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            <input
+              ref={videoInputRef}
+              type="file"
+              accept={ALLOWED_VIDEO_TYPE}
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.[0]) addVideo(e.target.files[0]);
+                e.target.value = '';
+              }}
+            />
+
+            {/* [TEST] 서버 경유(멀티파트) 업로드 — Presigned 방식과의 응답 시간 비교 측정 전용, local 프로필 */}
+            {video && (
+              <div className="mt-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleLegacyUpload}
+                  disabled={isLegacyUploading}
+                  className="px-4 py-2 rounded-full text-[12px] font-semibold border border-black/10 text-charcoal/70 hover:bg-black/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isLegacyUploading ? '멀티파트 업로드 중...' : '[TEST] 멀티파트 파일로 업로드'}
+                </button>
+                {legacyResult && (
+                  <span className="text-[11px] opacity-60">{legacyResult}</span>
                 )}
               </div>
             )}

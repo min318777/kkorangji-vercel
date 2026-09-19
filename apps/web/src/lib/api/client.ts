@@ -14,7 +14,7 @@ export class ApiError extends Error {
 
 // 토큰 재발급 — POST /api/auth/token/refresh
 // 서버는 바디 없이 응답 헤더 Authorization에 새 액세스 토큰을 담아 반환
-async function reissueToken(): Promise<string | null> {
+export async function reissueToken(): Promise<string | null> {
   try {
     const res = await fetch(`${BASE_URL}/api/auth/token/refresh`, {
       method: 'POST',

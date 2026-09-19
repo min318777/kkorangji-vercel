@@ -169,8 +169,8 @@ export default function LostEditPage({ params }: { params: Promise<{ id: string 
 
       if (newImages.length > 0) {
         setSubmitStep('이미지 업로드 준비 중...');
-        const contentTypes = newImages.map((img) => img.file!.type);
-        const presignedItems = await getPresignedUrls(contentTypes);
+        const fileRequests = newImages.map((img) => ({ contentType: img.file!.type, fileSize: img.file!.size }));
+        const presignedItems = await getPresignedUrls(fileRequests);
         setSubmitStep('이미지 업로드 중...');
         await Promise.all(
           newImages.map(async (img, idx) => uploadToS3(presignedItems[idx].presignedUrl, img.file!))
